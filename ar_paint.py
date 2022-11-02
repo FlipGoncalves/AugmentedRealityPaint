@@ -17,8 +17,48 @@ import time
 from colorama import Fore, Style
 import random
 
-# processes the image to give us the binary image to calculate the centroid of the largest area
+# define a class to pass parameters around functions easily
+class PaintParameters:
+    # Default parameters
+    size_brush = 5
+    last_point = None
+    brush = True
+    drawing_square = False
+    drawing_circle = False
+    centroid = None
+    centroid_I = (-1, -1)
+    color = (0,0,0)
+
+    # min distance_squared between two consecutive points to be detected as an oscilation
+    shake_detection_threshold = 1600
+    # mouse coordinates for mouse brush
+    mouse_coords = {'x': None, 'y': None}
+    # last pressed key
+    key = -1
+    # set to True to stop main loop
+    stop = False
+
+    def __init__(self, frame, height, width, use_video_canvas, use_shake_detection, use_mouse, paint_numeric):
+        self.frame = frame
+        self.cam_output = frame
+        self.height = height
+        self.width = width
+        # create canvas
+        self.painter = np.ones((height, width, 3), np.uint8) * 255
+        # mask
+        self.mask = np.zeros((height, width, 3))
+        self.output = self.painter
+        self.use_video_canvas = use_video_canvas
+        self.use_shake_detection = use_shake_detection
+        self.use_mouse = use_mouse
+        self.paint_numeric = paint_numeric
+
+
+
 def processImage(ranges, image):
+    """
+    # Applies binary threshould operation according to given ranges
+    """
 
     # processing
     mins = np.array([ranges['B']['min'], ranges['G']['min'], ranges['R']['min']])
@@ -36,12 +76,13 @@ def processImage(ranges, image):
     # get binary image with threshold the values not in the mask
     _, image_processed = cv2.threshold(image_processed, 1, 255, cv2.THRESH_BINARY)
 
-    return image_processed, mask
+    return image_processed
+
 
 # create numeric paint and the evaluation value
-def numericPainter(painter, w, h, last_color):
+def numericPainter(parameters: PaintParameters, last_color):
     # create paint numeric
-    evaluation_painter = painter.copy()
+    parameters.evaluation_painter = parameters.painter.copy()
 
     # random number of lines
     num_lines = random.randint(2,2)
@@ -51,6 +92,9 @@ def numericPainter(painter, w, h, last_color):
 
     # colors used (b,g,r)
     colors = [(255,0,0), (0,255,0), (0,0,255)]
+
+    w = parameters.width
+    h = parameters.height
 
     # calculate lines
     for i in range(num_lines+1):
@@ -79,32 +123,30 @@ def numericPainter(painter, w, h, last_color):
             color = colors[random.randint(0,2)]
 
         # create polygon to paint the right colors
-        evaluation_painter = cv2.fillPoly(evaluation_painter, [pts], color)
+        parameters.evaluation_painter = cv2.fillPoly(parameters.evaluation_painter, [pts], color)
         # points for the text in the center
         point_txt = (int((points[i][1][0] - start_point[0])/2))+start_point[0], int((end_point[1] - start_point[1])/2)
 
         # painter
-        painter = cv2.putText(painter, str(colors.index(color)+1), point_txt, cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 2, cv2.LINE_AA)
+        parameters.painter = cv2.putText(parameters.painter, str(colors.index(color)+1), point_txt, cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 2, cv2.LINE_AA)
 
         # save last color for next polygon
         last_color = color
 
     # create lines
     for i in range(len(points)):
-        cv2.line(evaluation_painter, points[i][0], points[i][1], (0,0,0), 3, -1)
-        cv2.line(painter, points[i][0], points[i][1], (0,0,0), 3, -1)
+        cv2.line(parameters.evaluation_painter, points[i][0], points[i][1], (0,0,0), 3, -1)
+        cv2.line(parameters.painter, points[i][0], points[i][1], (0,0,0), 3, -1)
 
     # temp for clear
-    temp = painter.copy()
+    parameters.temp = parameters.painter.copy()
 
     # number of pixels for the evaluation
-    total_pixels = np.sum(np.equal(evaluation_painter, painter).astype(np.uint8))
+    parameters.total_pixels = np.sum(np.equal(parameters.evaluation_painter, parameters.painter).astype(np.uint8))
 
     # print different colors and their number
     print("Colors:\n"+ Style.BRIGHT + Fore.BLUE +"1 - Blue\n"+ Style.BRIGHT + Fore.GREEN +"2 - Green\n"+ Style.BRIGHT + Fore.RED +"3 - Red" + Style.RESET_ALL)
 
-    # return variables
-    return painter, evaluation_painter, temp, total_pixels
 
 # create image for commands
 def commands(canvas):
@@ -124,6 +166,179 @@ def commands(canvas):
         canvas = cv2.putText(canvas, commands[c], org, font, fontScale, color, thickness, cv2.LINE_AA)
 
     return canvas
+
+
+def findCentroid(parameters: PaintParameters, image_binary):
+    parameters.centroid = None
+
+    # use mouse as brush
+    if parameters.use_mouse and parameters.mouse_coords['x'] is not None:
+        parameters.centroid = (parameters.mouse_coords['x'], parameters.mouse_coords['y'])
+
+    connectivity = 4  
+    # Perform the operation
+    nb_components, labels, stats, centroids = cv2.connectedComponentsWithStats(cv2.cvtColor(image_binary, cv2.COLOR_BGR2GRAY), connectivity, cv2.CV_32S)
+    # Find the largest component
+    # Note: range() starts from 1 since 0 is the background label.
+    if nb_components > 1:
+        #count = 0
+        max_label, _ = max([(i, stats[i, cv2.CC_STAT_AREA]) for i in range(1, nb_components)], key=lambda x: x[1])
+
+        # centroid coordinates
+        centroid = (int(centroids[max_label][0]), int(centroids[max_label][1]))
+
+        # highlight largest area
+        parameters.mask = np.equal(labels, max_label)
+        b,g,r = cv2.split(parameters.frame)
+        b[parameters.mask] = 0
+        r[parameters.mask] = 0
+        g[parameters.mask] = 200
+        parameters.cam_output = cv2.merge((b,g,r))
+
+        # put text and highlight the center
+        cv2.line(parameters.cam_output, (centroid[0]+5, centroid[1]), (centroid[0]-5, centroid[1]), (0,0,255), 5, -1)
+        cv2.line(parameters.cam_output, (centroid[0], centroid[1]+5), (centroid[0], centroid[1]-5), (0,0,255), 5, -1)
+
+        parameters.centroid = centroid
+    else:
+        parameters.mask = np.zeros((parameters.height, parameters.width, 3))
+        #if count == 0:
+        #    print(Style.BRIGHT + Fore.RED + "Please place your object in front of the camera!" + Style.RESET_ALL)
+        #    count += 1
+
+
+def drawOnCanvas(parameters: PaintParameters):
+
+    centroid = parameters.centroid
+    last_point = parameters.last_point
+
+    if last_point is not None and centroid is not None:
+        if not parameters.drawing_square and not parameters.drawing_circle and parameters.brush:
+            # get squared distance between current point and previous
+            distance = (last_point[0]-centroid[0])**2 + (last_point[1]-centroid[1])**2
+            # oscilation detected, draw a single point
+            if distance > parameters.shake_detection_threshold and parameters.use_shake_detection:
+                cv2.circle(parameters.painter, centroid, parameters.size_brush, parameters.color, -1)
+            else:
+                cv2.line(parameters.painter, last_point, centroid, parameters.color, parameters.size_brush, -1)
+            
+        #Drawing a square
+        if parameters.key == ord("1") and not parameters.drawing_square:
+            parameters.centroid_I = centroid
+            parameters.drawing_square = True
+        # Preview shape
+        elif parameters.key == ord("1") and parameters.drawing_square:
+            cv2.rectangle(parameters.frame, parameters.centroid_I, centroid, parameters.color, parameters.size_brush)
+        # Key is no longer held, commit to drawing shape
+        elif parameters.drawing_square:
+            parameters.drawing_square = False
+            cv2.rectangle(parameters.painter, parameters.centroid_I, centroid, parameters.color, parameters.size_brush)
+            
+        # Drawing a circle
+        if parameters.key == ord("2") and not parameters.drawing_circle:
+            parameters.centroid_I = centroid
+            parameters.drawing_circle = True
+        # Preview shape
+        elif parameters.key == ord("2") and parameters.drawing_circle:
+            radius = int(((parameters.centroid_I[0]-centroid[0])**2 + (parameters.centroid_I[1]-centroid[1])**2)**0.5)
+            cv2.circle (parameters.frame, parameters.centroid_I, radius, parameters.color, parameters.size_brush)
+        # Key is no longer held, commit to drawing shape
+        elif parameters.drawing_circle:
+            parameters.drawing_circle = False
+            radius = int(((parameters.centroid_I[0]-centroid[0])**2 + (parameters.centroid_I[1]-centroid[1])**2)**0.5)
+            cv2.circle (parameters.painter, parameters.centroid_I, radius, parameters.color, parameters.size_brush)
+   
+    parameters.last_point = centroid
+
+
+def processKey(parameters: PaintParameters, window_name_paint):
+    # user quits
+    if parameters.key == ord("q"):
+        print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"q"+Fore.RED+"\n\tEnding program")
+        parameters.stop = True
+    # brush
+    elif parameters.key == ord("+"):
+        print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"+"+"\n\tIncreasing"+Style.RESET_ALL+" brush size")
+        parameters.size_brush += 1
+    elif parameters.key == ord("-"):
+        print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"-"+"\n\tDecreasing"+Style.RESET_ALL+" brush size")
+        parameters.size_brush = max(2, parameters.size_brush-1)
+
+    # color
+    elif parameters.key == ord("r"):
+        print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"r"+Style.RESET_ALL+"\n\tChanging color to "+Style.BRIGHT+Fore.RED+"RED"+Style.RESET_ALL)
+        parameters.color = (0,0,255)
+    elif parameters.key == ord("g"):
+        print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"g"+Style.RESET_ALL+"\n\tChanging color to "+Style.BRIGHT+Fore.GREEN+"GREEN"+Style.RESET_ALL)
+        parameters.color = (0,255,0)
+    elif parameters.key == ord("b"):
+        print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"b"+Style.RESET_ALL+"\n\tChanging color to "+Style.BRIGHT+Fore.BLUE+"BLUE"+Style.RESET_ALL)
+        parameters.color = (255,0,0)
+
+    # clear
+    elif parameters.key == ord("c"):
+        print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"c"+Style.RESET_ALL+"\n\tClearing canvas")
+        parameters.painter = np.ones((parameters.height, parameters.width, 3), np.uint8) * 255
+        if parameters.paint_numeric:
+            parameters.painter = parameters.temp
+    
+    # save
+    elif parameters.key == ord("w"):
+        file_name = f"drawing_{(time.ctime(time.time())).replace(' ', '_')}.png"
+        print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"w"+Style.RESET_ALL+"\n\tWriting to file " + Style.BRIGHT + Fore.GREEN + file_name + Style.RESET_ALL)
+        cv2.imwrite(file_name, parameters.output)
+        if parameters.paint_numeric:
+            # do evaluation_painter
+            max_pixels = (parameters.height * parameters.width * 3) - parameters.total_pixels
+            total_pixels = np.sum(np.equal(parameters.evaluation_painter, parameters.painter).astype(np.uint8)) - parameters.total_pixels
+
+            accuracy = ((total_pixels / max_pixels) * 100)
+
+            print(f"Accuracy: {Style.BRIGHT}{Fore.GREEN}{round(accuracy,2)}{Style.RESET_ALL}%")
+
+            if accuracy < 40:
+                print("Evaluation: "+ Style.BRIGHT + Fore.RED +"Not Sattisfactory - D" + Style.RESET_ALL)
+            elif accuracy < 60:
+                print("Evaluation: " + Style.BRIGHT + Fore.CYAN +"Satisfactory - C" + Style.RESET_ALL)
+            elif accuracy < 80:
+                print("Evaluation: " + Style.BRIGHT + Fore.BLUE +"Good - B" + Style.RESET_ALL)
+            elif accuracy < 90:
+                print("Evaluation: " + Style.BRIGHT + Fore.GREEN +"Very Good - A" + Style.RESET_ALL)
+            else:
+                print("Evaluation: " + Style.BRIGHT + Fore.YELLOW +"Excellent - A+" + Style.RESET_ALL)
+
+            cv2.destroyAllWindows()
+            cv2.imshow("Evaluation", parameters.evaluation_painter)
+            cv2.imshow(window_name_paint, parameters.painter)
+            cv2.waitKey(0)
+            parameters.stop = True
+
+    # extra keys
+    # erase
+    elif parameters.key == ord("e"):
+        print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"e"+Style.RESET_ALL+"\n\tErasing")
+        parameters.color = (255,255,255)
+
+    # switch brush
+    elif parameters.key == ord("s"):
+        parameters.brush = not parameters.brush
+        print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"s"+Style.RESET_ALL+"\n\tSwitching brush "+((Style.BRIGHT+Fore.GREEN+"ON") if parameters.brush else (Style.BRIGHT+Fore.RED+"OFF")) +Style.RESET_ALL)
+    
+
+def finalizeOutput(parameters: PaintParameters):
+    if parameters.use_video_canvas:
+        mask = np.not_equal(cv2.cvtColor(parameters.painter, cv2.COLOR_BGR2GRAY), 255)
+        # Repeat mask along the three channels
+        mask = np.repeat(mask[:,:,np.newaxis], 3, axis=2)
+        parameters.output = parameters.frame.copy()
+        parameters.output[mask] = parameters.painter[mask]
+    else:
+        parameters.output = parameters.painter
+
+    # flip camera and drawing horizontaly
+    parameters.cam_output = cv2.flip(parameters.cam_output, 1)  
+    parameters.output = cv2.flip(parameters.output, 1)  
+
 
 def main():
 
@@ -155,24 +370,27 @@ def main():
     capture = cv2.VideoCapture(0)
 
     # Opening JSON file
-    f = open(args["JSON"])
-    data = json.load(f)
+    try:
+        with open(args["JSON"]) as f:
+            data = json.load(f)
+    except:
+        print(f"{Fore.RED}Error opening file, exiting...{Style.RESET_ALL}")
+        exit(1)
 
-    # painter variables
-    size_brush = 5
-    last_point = None
-    brush = True
-    drawing_square = False
-    drawing_circle = False
-    centroid_I = (-1, -1)
-    color = (0,0,0)  # starter color
-
-    # min distance_squared between two consecutive points to be detected as an oscilation
-    shake_detection_threshold = 1600
 
     _, frame = capture.read()
     # height and width of our captured frame
     height, width = frame.shape[0:2]
+
+    # create parameters object
+    parameters = PaintParameters(
+        frame, height, width,
+        args["video_canvas"],
+        args["use_shake_detection"],
+        args["use_mouse"],
+        args["paint_numeric"]
+    )
+
 
     # windows
     window_name = 'Original'
@@ -191,215 +409,49 @@ def main():
     cv2.namedWindow(window_name_commands,cv2.WINDOW_AUTOSIZE)
     cv2.moveWindow(window_name_commands, width*2, 0)
 
-    # create canvas
-    painter = np.ones((height, width, 3), np.uint8) * 255
-    # mask
-    mr = np.zeros((height, width, 3))
 
-    # mouse coordinates for mouse brush
-    mouse_coords = {'x': None, 'y': None}
-
-    if args['use_mouse']:
+    if parameters.use_mouse:
         # pass {'x': int, 'y': int} dict as param
         def mouseHoverCallback(event, x, y, flags, param):
             if event == cv2.EVENT_MOUSEMOVE:
                 # mirror x coordinate, as the drawing is flipped horizontally
                 param['x'] = width - int(x)
                 param['y'] = int(y)
-        cv2.setMouseCallback(window_name_paint, mouseHoverCallback, mouse_coords)
+        cv2.setMouseCallback(window_name_paint, mouseHoverCallback, parameters.mouse_coords)
 
-    if args["paint_numeric"]:
+    if parameters.paint_numeric:
         # create paint numeric
-        painter, evaluation_painter, temp, total_pixels = numericPainter(painter, width, height, color)
+        numericPainter(parameters, (0,0,0))
 
 
     # while user wants video capture
-    while True:
+    while not parameters.stop:
 
         # get frame
-        ret, image = capture.read()
-        cam_output = image
+        ret, parameters.frame = capture.read()
+        parameters.cam_output = parameters.frame
 
         # get key
-        k = cv2.waitKey(16)  # 60 fps
+        parameters.key = cv2.waitKey(16)  # 60 fps
 
         # error getting the frame
         if not ret:
             print(Style.BRIGHT + Fore.RED + "failed to grab frame" + Style.RESET_ALL)
             break
 
-        image_p, mask = processImage(data["limits"], image)
+        image_binary = processImage(data["limits"], parameters.frame)
+        findCentroid(parameters, image_binary)
+        drawOnCanvas(parameters)
+        finalizeOutput(parameters)
 
-        # centroid initialization
-        centroid = None
-
-        # use mouse as brush
-        if args['use_mouse'] and mouse_coords['x'] is not None:
-            centroid = (mouse_coords['x'], mouse_coords['y'])
-
-        connectivity = 4  
-        # Perform the operation
-        nb_components, labels, stats, centroids = cv2.connectedComponentsWithStats(cv2.cvtColor(image_p, cv2.COLOR_BGR2GRAY), connectivity, cv2.CV_32S)
-        # Find the largest non background component.
-        # Note: range() starts from 1 since 0 is the background label.
-        if nb_components > 1:
-            count = 0
-            max_label, max_size = max([(i, stats[i, cv2.CC_STAT_AREA]) for i in range(1, nb_components)], key=lambda x: x[1])
-
-            # centroid coordinates
-            centroid = (int(centroids[max_label][0]), int(centroids[max_label][1]))
-
-            # highlight largest area
-            mr = np.equal(labels, max_label)
-            b,g,r = cv2.split(image)
-            b[mr] = 0
-            r[mr] = 0
-            g[mr] = 200
-            cam_output = cv2.merge((b,g,r))
-
-            # put text and highlight the center
-            cv2.line(cam_output, (centroid[0]+5, centroid[1]), (centroid[0]-5, centroid[1]), (0,0,255), 5, -1)
-            cv2.line(cam_output, (centroid[0], centroid[1]+5), (centroid[0], centroid[1]-5), (0,0,255), 5, -1)
-        else:
-            mr = np.zeros((frame.shape[0], frame.shape[1], 3))
-            if count == 0:
-                print(Style.BRIGHT + Fore.RED + "Please place your object in front of the camera!" + Style.RESET_ALL)
-                count += 1
-
-        if last_point is not None and centroid is not None:
-            
-            if not drawing_square and not drawing_circle and brush:
-                # get squared distance between current point and previous
-                distance = (last_point[0]-centroid[0])**2 + (last_point[1]-centroid[1])**2
-                # oscilation detected, draw a single point
-                if distance > shake_detection_threshold and args['use_shake_detection']:
-                    cv2.circle(painter, centroid, size_brush, color, -1)
-                else:
-                    cv2.line(painter, last_point, centroid, color, size_brush, -1)
-                
-            #Drawing a square
-            if k == ord("1") and not drawing_square:
-                centroid_I = centroid
-                drawing_square = True
-            # Preview shape
-            elif k == ord("1") and drawing_square:
-                cv2.rectangle(image, centroid_I, centroid, color, size_brush)
-            # Key is no longer held, commit to drawing shape
-            elif drawing_square:
-                drawing_square = False
-                cv2.rectangle(painter, centroid_I, centroid, color, size_brush)
-
-                
-            # Drawing a circle
-            if k == ord("2") and not drawing_circle:
-                centroid_I = centroid
-                drawing_circle = True
-            # Preview shape
-            elif k == ord("2") and drawing_circle:
-                radius = int(((centroid_I[0]-centroid[0])**2 + (centroid_I[1]-centroid[1])**2)**0.5)
-                cv2.circle (image, centroid_I, radius, color, size_brush)
-            # Key is no longer held, commit to drawing shape
-            elif drawing_circle:
-                drawing_circle = False
-                radius = int(((centroid_I[0]-centroid[0])**2 + (centroid_I[1]-centroid[1])**2)**0.5)
-                cv2.circle (painter, centroid_I, radius, color, size_brush)
-
-                    
-        last_point = centroid
-
-
-        if args["video_canvas"]:
-            mask = np.not_equal(cv2.cvtColor(painter, cv2.COLOR_BGR2GRAY), 255)
-            # Repeat mask along the three channels
-            mask = np.repeat(mask[:,:,np.newaxis], 3, axis=2)
-            output = image.copy()
-            output[mask] = painter[mask]
-        else:
-            output = painter
-
-        # flip camera and drawing horizontaly
-        cam_output = cv2.flip(cam_output, 1)  
-        output = cv2.flip(output, 1)  
-
-        cv2.imshow(window_name, cam_output)
-        cv2.imshow(window_name_paint, output)
+        cv2.imshow(window_name, parameters.cam_output)
+        cv2.imshow(window_name_paint, parameters.output)
         cv2.imshow(window_name_commands, commands(np.ones((frame.shape[0], frame.shape[1], 3)) * 0))
-        cv2.imshow(window_name_segmented, image_p)
-        cv2.imshow(window_name_area, mr.astype(np.uint8)*255)
+        cv2.imshow(window_name_segmented, image_binary)
+        cv2.imshow(window_name_area, parameters.mask.astype(np.uint8)*255)
 
-        # user quits
-        if k == ord("q"):
-            print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"q"+Fore.RED+"\n\tEnding program")
-            break
-
-        # brush
-        elif k == ord("+"):
-            print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"+"+"\n\tIncreasing"+Style.RESET_ALL+" brush size")
-            size_brush += 1
-        elif k == ord("-"):
-            print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"-"+"\n\tDecreasing"+Style.RESET_ALL+" brush size")
-            size_brush = max(2, size_brush-1)
-
-        # color
-        elif k == ord("r"):
-            print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"r"+Style.RESET_ALL+"\n\tChanging color to "+Style.BRIGHT+Fore.RED+"RED"+Style.RESET_ALL)
-            color = (0,0,255)
-        elif k == ord("g"):
-            print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"g"+Style.RESET_ALL+"\n\tChanging color to "+Style.BRIGHT+Fore.GREEN+"GREEN"+Style.RESET_ALL)
-            color = (0,255,0)
-        elif k == ord("b"):
-            print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"b"+Style.RESET_ALL+"\n\tChanging color to "+Style.BRIGHT+Fore.BLUE+"BLUE"+Style.RESET_ALL)
-            color = (255,0,0)
-
-        # clear
-        elif k == ord("c"):
-            print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"c"+Style.RESET_ALL+"\n\tClearing canvas")
-            painter = np.ones((height, width, 3), np.uint8) * 255
-            if args["paint_numeric"]:
-                painter = temp
+        processKey(parameters, window_name_paint)
         
-        # save
-        elif k == ord("w"):
-            file_name = f"drawing_{(time.ctime(time.time())).replace(' ', '_')}.png"
-            print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"w"+Style.RESET_ALL+"\n\tWriting to file " + Style.BRIGHT + Fore.GREEN + file_name + Style.RESET_ALL)
-            cv2.imwrite(file_name, output)
-            if args["paint_numeric"]:
-                # do evaluation_painter
-                max_pixels = (frame.shape[0] * frame.shape[1] * 3) - total_pixels
-                total_pixels = np.sum(np.equal(evaluation_painter, painter).astype(np.uint8)) - total_pixels
-
-                accuracy = ((total_pixels / max_pixels) * 100)
-
-                print("Accuracy: "+Style.BRIGHT+Fore.GREEN+round(accuracy,2)+Style.RESET_ALL+"%")
-
-                if accuracy < 40:
-                    print("Evaluation: "+ Style.BRIGHT + Fore.RED +"Not Sattisfactory - D" + Style.RESET_ALL)
-                elif accuracy < 60:
-                    print("Evaluation: " + Style.BRIGHT + Fore.CYAN +"Satisfactory - C" + Style.RESET_ALL)
-                elif accuracy < 80:
-                    print("Evaluation: " + Style.BRIGHT + Fore.BLUE +"Good - B" + Style.RESET_ALL)
-                elif accuracy < 90:
-                    print("Evaluation: " + Style.BRIGHT + Fore.GREEN +"Very Good - A" + Style.RESET_ALL)
-                else:
-                    print("Evaluation: " + Style.BRIGHT + Fore.YELLOW +"Excellent - A+" + Style.RESET_ALL)
-
-                cv2.destroyAllWindows()
-                cv2.imshow("Evaluation", evaluation_painter)
-                cv2.imshow(window_name_paint, painter)
-                cv2.waitKey(0)
-                break
-
-        # extra keys
-        # erase
-        elif k == ord("e"):
-            print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"e"+Style.RESET_ALL+"\n\tErasing")
-            color = (255,255,255)
-
-        # switch brush
-        elif k == ord("s"):
-            brush = False if brush else True
-            print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"s"+Style.RESET_ALL+"\n\tSwitching brush "+((Style.BRIGHT+Fore.GREEN+"ON") if brush else (Style.BRIGHT+Fore.RED+"OFF")) +Style.RESET_ALL)
-    
     
     # end capture and destroy windows
     capture.release()
