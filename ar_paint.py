@@ -221,7 +221,7 @@ def main():
         cam_output = image
 
         # get key
-        k = cv2.waitKey(33)  # 30 fps
+        k = cv2.waitKey(16)  # 60 fps
 
         # error getting the frame
         if not ret:
@@ -401,7 +401,6 @@ def main():
             print("Key Selected: "+Style.BRIGHT+Fore.YELLOW+"s"+Style.RESET_ALL+"\n\tSwitching brush "+((Style.BRIGHT+Fore.GREEN+"ON") if brush else (Style.BRIGHT+Fore.RED+"OFF")) +Style.RESET_ALL)
     
     
-
     # end capture and destroy windows
     capture.release()
     cv2.destroyAllWindows()
